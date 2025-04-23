@@ -77,16 +77,16 @@ typedef struct {
 void malloc_run_state(RunState* s, Config* p) {
     // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    s->x = calloc(p->dim, sizeof(float));
-    s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
-    s->hb = calloc(p->hidden_dim, sizeof(float));
-    s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->q = calloc(p->dim, sizeof(float));
-    s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    s->logits = calloc(p->vocab_size, sizeof(float));
+    s->x = (float*)calloc(p->dim, sizeof(float));
+    s->xb = (float*)calloc(p->dim, sizeof(float));
+    s->xb2 = (float*)calloc(p->dim, sizeof(float));
+    s->hb = (float*)calloc(p->hidden_dim, sizeof(float));
+    s->hb2 = (float*)calloc(p->hidden_dim, sizeof(float));
+    s->q = (float*)calloc(p->dim, sizeof(float));
+    s->key_cache = (float*)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    s->value_cache = (float*)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    s->att = (float*)calloc(p->n_heads * p->seq_len, sizeof(float));
+    s->logits = (float*)calloc(p->vocab_size, sizeof(float));
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
      || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
@@ -155,7 +155,7 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     // memory map the Transformer weights into the data pointer
     *fd = open(checkpoint, O_RDONLY); // open in read only mode
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
+    *data = (float*)mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
     float* weights_ptr = *data + sizeof(Config)/sizeof(float);
     memory_map_weights(weights, config, weights_ptr, shared_weights);
@@ -241,12 +241,14 @@ void precompute_freqs_cis(float* out, int dim, int seq_len, int head_size, float
 }
 
 // Step 2: Apply RoPE to a single vector
-void apply_rope(float* vec, float* freqs_cis, int dim, int pos, int seq_len) {
+void apply_rope(float* vec, float* freqs_cis, int dim, int pos, int seq_len) 
+{
     int half_dim = dim / 2;
     float* re = freqs_cis + pos * half_dim;
     float* im = freqs_cis + (half_dim * seq_len) + pos * half_dim;
 
-    for (int i = 0; i < dim; i += 2) {
+    for (int i = 0; i < dim; i += 2) 
+    {
         int j = i / 2;
         float v0 = vec[i];
         float v1 = vec[i + 1];
@@ -257,7 +259,8 @@ void apply_rope(float* vec, float* freqs_cis, int dim, int pos, int seq_len) {
     }
 }
 
-float* forward(Transformer* transformer, int token, int pos) {
+float* forward(Transformer* transformer, int token, int pos) 
+{
 
     // a few convenience variables
     Config* p = &transformer->config;
@@ -277,7 +280,9 @@ float* forward(Transformer* transformer, int token, int pos) {
     float* freqs_cis = (float*)malloc(2 * p->seq_len * (dim / 2)*sizeof(float));
     precompute_freqs_cis(freqs_cis, dim, p->seq_len, head_size,10000.0f);
     // forward all the layers
-    for(unsigned long long l = 0; l < p->n_layers; l++) {
+    
+    for(unsigned long long l = 0; l < p->n_layers; l++) 
+    {
 
         // attention rmsnorm
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
@@ -317,7 +322,8 @@ float* forward(Transformer* transformer, int token, int pos) {
         // multihead attention. iterate over all heads
         int h;
         #pragma omp parallel for private(h)
-        for (h = 0; h < p->n_heads; h++) {
+        for (h = 0; h < p->n_heads; h++) 
+        {
             // get the query vector for this head
             float* q = s->q + h * head_size;
             // attention scores for this head
@@ -358,7 +364,8 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
 
         // residual connection back into x
-        for (int i = 0; i < dim; i++) {
+        for (int i = 0; i < dim; i++) 
+        {
             x[i] += s->xb2[i];
         }
 
@@ -481,7 +488,7 @@ void safe_printf(char *piece) {
 int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) {
     // efficiently find the perfect match for str in vocab, return its index or -1 if not found
     TokenIndex tok = { .str = str }; // acts as the key to search for
-    TokenIndex *res = bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
+    TokenIndex *res = (TokenIndex*) bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
     return res != NULL ? res->id : -1;
 }
 
@@ -492,7 +499,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     if (t->sorted_vocab == NULL) {
         // lazily malloc and sort the vocabulary
-        t->sorted_vocab = malloc(t->vocab_size * sizeof(TokenIndex));
+        t->sorted_vocab = (TokenIndex*)malloc(t->vocab_size * sizeof(TokenIndex));
         for (int i = 0; i < t->vocab_size; i++) {
             t->sorted_vocab[i].str = t->vocab[i];
             t->sorted_vocab[i].id = i;
@@ -502,7 +509,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     // create a temporary buffer that will store merge candidates of always two consecutive tokens
     // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    char* str_buffer = malloc((t->max_token_length*2 +1 +2) * sizeof(char));
+    char* str_buffer = (char*)malloc((t->max_token_length*2 +1 +2) * sizeof(char));
     size_t str_len = 0;
 
     // start at 0 tokens
@@ -706,7 +713,7 @@ void build_sampler(Sampler* sampler, int vocab_size, float temperature, float to
     sampler->topp = topp;
     sampler->rng_state = rng_seed;
     // buffer only used with nucleus sampling; may not need but it's ~small
-    sampler->probindex = malloc(sampler->vocab_size * sizeof(ProbIndex));
+    sampler->probindex = (ProbIndex*)malloc(sampler->vocab_size * sizeof(ProbIndex));
 }
 
 void free_sampler(Sampler* sampler) {
