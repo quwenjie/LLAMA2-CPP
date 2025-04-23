@@ -228,6 +228,35 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     }
 }
 
+void precompute_freqs_cis(float* out, int dim, int seq_len, int head_size, float theta) {
+    for (int pos = 0; pos < seq_len; ++pos) {
+        for (int i = 0; i < dim; i += 2) {
+            int head_dim = i % head_size;
+            float freq = 1.0f / powf(theta, (float)head_dim / head_size);
+            float angle = pos * freq;
+            out[pos * (dim / 2) + i / 2] = cosf(angle);                                // real
+            out[pos * (dim / 2) + i / 2 + seq_len * (dim / 2)] = sinf(angle);          // imag
+        }
+    }
+}
+
+// Step 2: Apply RoPE to a single vector
+void apply_rope(float* vec, float* freqs_cis, int dim, int pos, int seq_len) {
+    int half_dim = dim / 2;
+    float* re = freqs_cis + pos * half_dim;
+    float* im = freqs_cis + (half_dim * seq_len) + pos * half_dim;
+
+    for (int i = 0; i < dim; i += 2) {
+        int j = i / 2;
+        float v0 = vec[i];
+        float v1 = vec[i + 1];
+        float fcr = re[j];
+        float fci = im[j];
+        vec[i]     = v0 * fcr - v1 * fci;
+        vec[i + 1] = v0 * fci + v1 * fcr;
+    }
+}
+
 float* forward(Transformer* transformer, int token, int pos) {
 
     // a few convenience variables
@@ -237,6 +266,7 @@ float* forward(Transformer* transformer, int token, int pos) {
     float *x = s->x;
     int dim = p->dim;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    //printf("%d %d\n",dim,kv_dim);
     int kv_mul = p->n_heads / p->n_kv_heads; // integer multiplier of the kv sharing in multiquery
     int hidden_dim =  p->hidden_dim;
     int head_size = dim / p->n_heads;
@@ -244,7 +274,8 @@ float* forward(Transformer* transformer, int token, int pos) {
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim*sizeof(*x));
-
+    float* freqs_cis = (float*)malloc(2 * p->seq_len * (dim / 2)*sizeof(float));
+    precompute_freqs_cis(freqs_cis, dim, p->seq_len, head_size,10000.0f);
     // forward all the layers
     for(unsigned long long l = 0; l < p->n_layers; l++) {
 
@@ -262,6 +293,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
+        /*
         for (int i = 0; i < dim; i+=2) {
             int head_dim = i % head_size;
             float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
@@ -277,6 +309,10 @@ float* forward(Transformer* transformer, int token, int pos) {
                 vec[i+1] = v0 * fci + v1 * fcr;
             }
         }
+            */
+        
+        apply_rope(s->q, freqs_cis, dim, pos, p->seq_len);
+        apply_rope(s->k, freqs_cis, kv_dim, pos, p->seq_len);
 
         // multihead attention. iterate over all heads
         int h;
@@ -908,10 +944,10 @@ int main(int argc, char *argv[]) {
     // default parameters
     char *checkpoint_path = NULL;  // e.g. out/model.bin
     char *tokenizer_path = "tokenizer.bin";
-    float temperature = 1.0f;   // 0.0 = greedy deterministic. 1.0 = original. don't set higher
+    float temperature = 0.0f;   // 0.0 = greedy deterministic. 1.0 = original. don't set higher
     float topp = 0.9f;          // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
     int steps = 256;            // number of steps to run for
-    char *prompt = NULL;        // prompt string
+    char *prompt = "I like Harry Potter. ";        // prompt string
     unsigned long long rng_seed = 0; // seed rng with time by default
     char *mode = "generate";    // generate|chat
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
