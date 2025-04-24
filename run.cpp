@@ -2,10 +2,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <cmath>
 #include <ctype.h>
 #include <time.h>
 #include <math.h>
 #include <string.h>
+#include <cassert>
 #include <fcntl.h>
 #if defined _WIN32
     #include "win.h"
@@ -230,6 +232,8 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     }
 }
 
+
+
 void precompute_freqs_cis(float* out, int dim, int seq_len, int head_size, float theta) {
     for (int pos = 0; pos < seq_len; ++pos) {
         for (int i = 0; i < dim; i += 2) {
@@ -270,11 +274,12 @@ float* forward(Transformer* transformer, int token, int pos)
     RunState* s = &transformer->state;
     float *x = s->x;
     int dim = p->dim;
+    int head_size = dim / p->n_heads;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     //printf("%d %d\n",dim,kv_dim);
     int kv_mul = p->n_heads / p->n_kv_heads; // integer multiplier of the kv sharing in multiquery
     int hidden_dim =  p->hidden_dim;
-    int head_size = dim / p->n_heads;
+    
 
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
@@ -285,13 +290,11 @@ float* forward(Transformer* transformer, int token, int pos)
     float* freqs_cis = (float*)malloc(2 * p->seq_len * (dim / 2)*sizeof(float));
     precompute_freqs_cis(freqs_cis, dim, p->seq_len, head_size,10000.0f);
     // forward all the layers
-    
-    for(unsigned long long l = 0; l < p->n_layers; l++) 
+    //
+    for(unsigned long long l = 0; l <p->n_layers; l++) 
     {
 
-        // attention rmsnorm
 
-        //cout<<"rms norm "<<dim<<" kv dim "<<kv_dim<<" heads: "<<p->n_heads<<" "<<head_size<<" "<<p->n_kv_heads<<endl;
 
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
 
@@ -303,6 +306,7 @@ float* forward(Transformer* transformer, int token, int pos)
         // qkv matmuls for this position
         matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
         matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
+
         matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
         
         apply_rope(s->q, freqs_cis, dim, pos, p->seq_len);
@@ -334,43 +338,52 @@ float* forward(Transformer* transformer, int token, int pos)
                 // save the score to the attention buffer
                 att[t] = score;
             }
-
+            
             // softmax the scores to get attention weights, from 0..pos inclusively
             softmax(att, pos + 1);
-
+            
             // weighted sum of the values, store back into xb
             float* xb = s->xb + h * head_size;
             memset(xb, 0, head_size * sizeof(float));
-            for (int t = 0; t <= pos; t++) {
+            for (int t = 0; t <= pos; t++) 
+            {
                 // get the value vector for this head and at this timestep
                 //float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                
+
                 float* v = s->value_cache + loff + t * kv_dim + h * head_size;
                 // get the attention weight for this timestep
                 float a = att[t];
                 // accumulate the weighted value into xb
-                for (int i = 0; i < head_size; i++) {
+                for (int i = 0; i < head_size; i++) 
+                {
                     xb[i] += a * v[i];
                 }
             }
+            
+            
         }
 
         // final matmul to get the output of the attention
         matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
-
+        
         // residual connection back into x
         for (int i = 0; i < dim; i++) 
         {
             x[i] += s->xb2[i];
         }
-
+        
         // ffn rmsnorm
         rmsnorm(s->xb, x, w->rms_ffn_weight + l*dim, dim);
 
+        
+
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
+
         matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
         matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+        //if(l==0)
+        //    cout<<"ffn hb,hb2 : "<<s->hb[0]<<" "<<s->hb2[0]<<endl;
 
         // SwiGLU non-linearity
         for (int i = 0; i < hidden_dim; i++) {
@@ -384,16 +397,18 @@ float* forward(Transformer* transformer, int token, int pos)
 
         // final matmul to get the output of the ffn
         matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
-
+        
         // residual connection
-        for (int i = 0; i < dim; i++) {
+        for (int i = 0; i < dim; i++) 
+        {
             x[i] += s->xb[i];
-        }
+        }    
     }
+    
 
-    // final rmsnorm
     rmsnorm(x, x, w->rms_final_weight, dim);
 
+    cout<<"gt output: "<<x[0]<<endl;
     // classifier into logits
     matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
     return s->logits;
@@ -783,11 +798,13 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     int next;        // will store the next token in the sequence
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;     // position in the sequence
-    while (pos < steps) {
+    int * str=new int[1000];
+    while (pos < steps) 
+    {
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, pos);
-
+        str[pos]=token;
         // advance the state machine
         if (pos < num_prompt_tokens - 1) {
             // if we are still processing the input prompt, force the next prompt token
@@ -797,6 +814,9 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
             next = sample(sampler, logits);
         }
         pos++;
+
+        if(pos==num_prompt_tokens)
+            break;
 
         // data-dependent terminating condition: the BOS (=1) token delimits sequences
         if (next == 1) { break; }
@@ -810,8 +830,205 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         // init the timer here because the first iteration can be slower
         if (start == 0) { start = time_in_ms(); }
     }
+    
     printf("\n");
 
+    Config* p = &transformer->config;
+    TransformerWeights* w = &transformer->weights;
+    RunState* s = &transformer->state;
+    int dim = p->dim;
+    int head_size = dim / p->n_heads;
+    float* embedding = new float[pos*dim];
+    for(int i=0;i<pos;i++)
+    {
+        int token = str[i];
+        float* content_row = w->token_embedding_table + token * dim;
+        memcpy(embedding+i*dim, content_row, dim*sizeof(float));
+    }
+    float* freqs_cis = (float*)malloc(2 * p->seq_len * (dim / 2)*sizeof(float));
+    precompute_freqs_cis(freqs_cis, dim, p->seq_len, head_size,10000.0f);
+    float* xb=new float[pos*dim];
+    float* q=new float[pos*dim];
+    float* kcache=new float[pos*dim];
+    float* vcache=new float[pos*dim];
+    float* scores = new float[p->n_heads * pos * pos];
+    float* aft_attn=new float[pos*dim];
+    float* xb2=new float[pos*dim];
+    float* xb3=new float[pos*dim];
+    float* hb=new float[pos*p->hidden_dim];
+    float* hb2=new float[pos*p->hidden_dim];
+    float* ffn = new float[pos * dim];
+    float* tmp = new float[pos * dim];
+    for(int l=0;l<p->n_layers;l++)
+    {
+        
+    
+        for(int i=0;i<pos;i++)
+        {
+            rmsnorm(xb+i*dim, embedding+i*dim, w->rms_att_weight + l*dim, dim);
+        }
+        
+        
+        memset(q,0,pos*dim*sizeof(float));
+        for(int i=0;i<pos;i++)
+        for(int k=0;k<dim;k++)
+        {
+            for(int j=0;j<dim;j++)
+            {
+                q[i*dim+k]+=xb[i*dim+j]*w->wq[l*dim*dim+k*dim+j];
+            }
+        }
+        
+        memset(kcache,0,pos*dim*sizeof(float));
+        for(int i=0;i<pos;i++)
+        for(int k=0;k<dim;k++)
+        {
+            for(int j=0;j<dim;j++)
+            {
+                kcache[i*dim + k] += xb[i*dim + j] * w->wk[l*dim*dim+k*dim + j];
+            }
+            
+        }
+        
+        
+        memset(vcache,0,pos*dim*sizeof(float));
+        for(int i=0;i<pos;i++)
+        for(int k=0;k<dim;k++)
+        {
+            for(int j=0;j<dim;j++)
+            {
+                vcache[i*dim+k]+=xb[i*dim+j]*w->wv[l*dim*dim+k*dim+j];
+            }
+        }
+
+        for(int i=0;i<pos;i++)
+        {
+            apply_rope(q+i*dim, freqs_cis, dim, i, p->seq_len);
+            apply_rope(kcache+i*dim, freqs_cis, dim, i, p->seq_len);
+        }
+
+
+        
+        memset(scores,0,p->n_heads * pos * pos * sizeof(float));
+        memset(aft_attn,0,pos*dim*sizeof(float));
+        for (int h = 0; h < p->n_heads; h++) 
+        {
+            for (int i = 0; i < pos; i++) 
+            {
+                float* hq = q + i * dim + h * head_size;
+
+                // Compute raw scores: q_i^h ⋅ k_j^h for j = 0..i
+                for (int j = 0; j <= i; j++) 
+                {
+                    float* hk = kcache + j * dim + h * head_size;
+                    float score = 0.0f;
+                    for (int d = 0; d < head_size; d++) 
+                    {
+                        score += hq[d] * hk[d];
+                    }
+                    scores[h * pos * pos + i * pos + j] = score / sqrtf((float)head_size);
+                }
+                softmax(scores + h * pos * pos + i * pos, i + 1); 
+            }
+
+            
+            for(int i=0;i<pos;i++)
+            {
+                for(int k=0;k<head_size;k++)
+                {
+                    for(int j=0;j<pos;j++)
+                    {
+                        aft_attn[i*dim+h*head_size+k]+=scores[h * pos * pos + i * pos + j]*vcache[j*dim+h*head_size+k];
+                    }
+                }
+            }
+        }
+
+        
+        memset(xb2,0,pos * dim * sizeof(float));
+        for(int i=0;i<pos;i++)
+        {
+            for(int k=0;k<dim;k++)
+            {
+                for(int j=0;j<dim;j++)
+                {
+                    xb2[i*dim+k]+=aft_attn[i*dim+j]*w->wo[l*dim*dim+k*dim+j];
+                }
+            }
+
+        }
+        for(int i=0;i<pos;i++)
+            for(int k=0;k<dim;k++)
+                xb2[i*dim+k]+=embedding[i*dim+k];
+        
+        
+        for(int i=0;i<pos;i++)    
+        {
+            rmsnorm(xb3+i*dim, xb2+i*dim, w->rms_ffn_weight + l*dim, dim);
+
+        }
+
+        
+        memset(hb,0,pos*p->hidden_dim*sizeof(float));
+        
+        memset(hb2,0,pos*p->hidden_dim*sizeof(float));
+
+        
+        for(int i=0;i<pos;i++)
+        for(int k=0;k<p->hidden_dim;k++)
+        {
+            for(int j=0;j<dim;j++)
+            {
+                hb[i*p->hidden_dim + k] += xb3[i*dim + j] * w->w1[l*dim*p->hidden_dim+k*dim + j];
+            } 
+        }
+        for(int i=0;i<pos;i++)
+        for(int k=0;k<p->hidden_dim;k++)
+        {
+            for(int j=0;j<dim;j++)
+            {
+                hb2[i*p->hidden_dim + k] += xb3[i*dim + j] * w->w3[l*dim*p->hidden_dim+k*dim + j];
+            } 
+        }
+
+
+        for (int i = 0; i < pos; i++) 
+        {
+            for (int k = 0; k < p->hidden_dim; k++) 
+            {
+                float val = hb[i * p->hidden_dim + k];
+                // silu(x) = x * sigmoid(x)
+                val *= (1.0f / (1.0f + expf(-val)));
+                val *= hb2[i * p->hidden_dim + k];
+                hb[i * p->hidden_dim + k] = val;
+            }
+        }
+        
+
+        
+        memset(ffn, 0, pos * dim * sizeof(float));
+        for (int i = 0; i < pos; i++) 
+        {
+            for (int k = 0; k < dim; k++) 
+            {
+                for (int j = 0; j < p->hidden_dim; j++) 
+                {
+                    ffn[i * dim + k] += hb[i * p->hidden_dim + j] * w->w2[l* dim * p->hidden_dim + k * p->hidden_dim + j];
+                }
+            }
+
+        }
+        for(int i=0;i<pos;i++)
+            for(int k=0;k<dim;k++)
+                embedding[i*dim+k]=xb2[i*dim+k]+ffn[i*dim+k];
+    }
+
+    for(int i=0;i<pos;i++)
+        rmsnorm(embedding+i*dim, embedding+i*dim, w->rms_final_weight, dim);
+    for(int i=0;i<pos;i++)
+            cout<<"Our result "<<embedding[i*dim]<<" ";
+        cout<<endl;
+        
     // report achieved tok/s (pos-1 because the timer starts after first iteration)
     if (pos > 1) {
         long end = time_in_ms();
